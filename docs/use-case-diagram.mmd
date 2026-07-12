@@ -1,0 +1,40 @@
+flowchart LR
+  Admin((Admin))
+  Developer((Developer))
+  Tester((Tester))
+
+  Login["Authenticate"]
+  ManageProjects["Manage projects"]
+  CreateIssue["Create task or bug"]
+  AssignIssue["Assign issue"]
+  UpdateStatus["Update issue status"]
+  AddComment["Add comments"]
+  FilterIssues["Filter and search issues"]
+  ViewDashboard["View dashboard statistics"]
+  ReviewActivity["Review activity history"]
+
+  Admin --> Login
+  Developer --> Login
+  Tester --> Login
+
+  Admin --> ManageProjects
+  Admin --> CreateIssue
+  Admin --> AssignIssue
+  Admin --> ViewDashboard
+  Admin --> ReviewActivity
+
+  Developer --> CreateIssue
+  Developer --> UpdateStatus
+  Developer --> AddComment
+  Developer --> FilterIssues
+  Developer --> ViewDashboard
+
+  Tester --> CreateIssue
+  Tester --> UpdateStatus
+  Tester --> AddComment
+  Tester --> FilterIssues
+  Tester --> ReviewActivity
+
+  CreateIssue --> AssignIssue
+  UpdateStatus --> ReviewActivity
+  AddComment --> ReviewActivity

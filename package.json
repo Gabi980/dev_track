@@ -1,0 +1,27 @@
+{
+  "name": "devtrack",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DevTrack - Web-based bug and task tracking system for small software teams.",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:server": "pnpm --filter @devtrack/server dev",
+    "dev:client": "pnpm --filter @devtrack/client dev",
+    "start": "pnpm --filter @devtrack/server start",
+    "build": "pnpm --filter @devtrack/client build",
+    "test": "pnpm --filter @devtrack/server test && pnpm --filter @devtrack/client build"
+  },
+  "keywords": [
+    "bug-tracker",
+    "task-tracker",
+    "software-development-tools",
+    "project-management"
+  ],
+  "author": "Project III",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "workspaces": [
+    "client",
+    "server"
+  ]
+}
