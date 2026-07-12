@@ -53,6 +53,12 @@ const statusPalette = {
   done: "#0f766e"
 };
 
+const demoAccounts = [
+  { role: "Admin", email: "admin@devtrack.local", password: "admin123", tone: "admin" },
+  { role: "Developer", email: "dev@devtrack.local", password: "dev123", tone: "developer" },
+  { role: "Tester", email: "tester@devtrack.local", password: "tester123", tone: "tester" }
+];
+
 export default function App() {
   const [user, setUser] = useState(() => {
     const stored = localStorage.getItem("devtrack_user");
@@ -410,23 +416,43 @@ function LoginView({ onLogin }) {
     }
   }
 
+  function selectDemoAccount(account) {
+    setEmail(account.email);
+    setPassword(account.password);
+    setError("");
+  }
+
   return (
     <main className="login-page">
       <section className="login-panel">
-        <div className="brand login-brand">
-          <div className="brand-mark">
-            <FolderKanban size={22} />
+        <div className="login-accent" aria-hidden="true" />
+
+        <div className="login-header">
+          <div className="brand login-brand">
+            <div className="brand-mark">
+              <FolderKanban size={22} />
+            </div>
+            <div>
+              <strong>DevTrack</strong>
+              <span>Bug & Task Tracker</span>
+            </div>
           </div>
-          <div>
-            <strong>DevTrack</strong>
-            <span>Bug & Task Tracker</span>
-          </div>
+          <span className="login-badge">Project III</span>
+        </div>
+
+        <div className="login-title">
+          <span>Workspace access</span>
+          <h1>Sign in</h1>
         </div>
 
         <form onSubmit={submit} className="login-form">
           <label>
             Email
-            <input value={email} onChange={(event) => setEmail(event.target.value)} />
+            <input
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="email"
+            />
           </label>
           <label>
             Password
@@ -434,6 +460,7 @@ function LoginView({ onLogin }) {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+              autoComplete="current-password"
             />
           </label>
 
@@ -444,45 +471,40 @@ function LoginView({ onLogin }) {
           </button>
         </form>
 
+        <div className="login-divider">
+          <span>Demo accounts</span>
+        </div>
+
         <div className="account-grid">
-          <DemoAccount role="Admin" email="admin@devtrack.local" password="admin123" />
-          <DemoAccount role="Developer" email="dev@devtrack.local" password="dev123" />
-          <DemoAccount role="Tester" email="tester@devtrack.local" password="tester123" />
+          {demoAccounts.map((account) => (
+            <DemoAccount
+              key={account.email}
+              {...account}
+              active={email === account.email}
+              onSelect={() => selectDemoAccount(account)}
+            />
+          ))}
         </div>
       </section>
-
-      <aside className="login-preview" aria-label="Board preview">
-        <div className="preview-head">
-          <span>Active sprint</span>
-          <strong>Release 1.0</strong>
-        </div>
-        <div className="preview-board">
-          <PreviewColumn label="To Do" count="3" tone="todo" />
-          <PreviewColumn label="In Progress" count="2" tone="progress" />
-          <PreviewColumn label="Testing" count="1" tone="testing" />
-        </div>
-        <div className="preview-card">
-          <span className="type-pill bug">
-            <Bug size={12} />
-            Bug
-          </span>
-          <strong>Fix dashboard counter refresh</strong>
-          <div className="preview-progress">
-            <span />
-          </div>
-        </div>
-      </aside>
     </main>
   );
 }
 
-function DemoAccount({ role, email, password }) {
+function DemoAccount({ role, email, password, tone, active, onSelect }) {
   return (
-    <div className="demo-account">
-      <strong>{role}</strong>
+    <button
+      type="button"
+      className={`demo-account ${tone} ${active ? "active" : ""}`}
+      onClick={onSelect}
+      aria-label={`Use ${role} account`}
+    >
+      <strong>
+        <span className="account-dot" />
+        {role}
+      </strong>
       <span>{email}</span>
       <code>{password}</code>
-    </div>
+    </button>
   );
 }
 
@@ -987,15 +1009,6 @@ function Modal({ title, children, onClose }) {
         </div>
         {children}
       </section>
-    </div>
-  );
-}
-
-function PreviewColumn({ label, count, tone }) {
-  return (
-    <div className={`preview-column ${tone}`}>
-      <span>{label}</span>
-      <strong>{count}</strong>
     </div>
   );
 }
