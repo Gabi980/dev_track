@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   AlertCircle,
   Bug,
   CalendarDays,
@@ -37,6 +38,20 @@ const typeLabels = {
 };
 
 const statusOrder = ["todo", "in_progress", "testing", "done"];
+const defaultFilters = {
+  projectId: "all",
+  status: "all",
+  priority: "all",
+  type: "all",
+  assigneeId: "all"
+};
+
+const statusPalette = {
+  todo: "#64748b",
+  in_progress: "#2563eb",
+  testing: "#d97706",
+  done: "#0f766e"
+};
 
 export default function App() {
   const [user, setUser] = useState(() => {
@@ -49,13 +64,7 @@ export default function App() {
   const [issues, setIssues] = useState([]);
   const [stats, setStats] = useState(null);
   const [selectedIssue, setSelectedIssue] = useState(null);
-  const [filters, setFilters] = useState({
-    projectId: "all",
-    status: "all",
-    priority: "all",
-    type: "all",
-    assigneeId: "all"
-  });
+  const [filters, setFilters] = useState(defaultFilters);
   const [query, setQuery] = useState("");
   const [issueModalOpen, setIssueModalOpen] = useState(false);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -110,6 +119,10 @@ export default function App() {
         ])
       ),
     [visibleIssues]
+  );
+  const activeFilterCount = useMemo(
+    () => Object.values(filters).filter((value) => value !== "all").length,
+    [filters]
   );
 
   async function refreshData() {
@@ -242,9 +255,16 @@ export default function App() {
 
       <main className="workspace">
         <header className="topbar">
-          <div>
+          <div className="page-title">
+            <span className="workspace-kicker">
+              <Activity size={15} />
+              Live workspace
+            </span>
             <h1>Project Board</h1>
-            <p>{loading ? "Syncing..." : `${visibleIssues.length} visible issues`}</p>
+            <p>
+              <span className={loading ? "sync-dot active" : "sync-dot"} />
+              {loading ? "Syncing..." : `${visibleIssues.length} visible issues`}
+            </p>
           </div>
 
           <div className="topbar-actions">
@@ -265,13 +285,29 @@ export default function App() {
 
         {stats && <Dashboard stats={stats} />}
 
-        <FilterBar filters={filters} setFilters={setFilters} users={users} />
+        <FilterBar
+          filters={filters}
+          setFilters={setFilters}
+          users={users}
+          activeFilterCount={activeFilterCount}
+          onReset={() => setFilters(defaultFilters)}
+        />
 
         <section className="board" aria-label="Issue board">
-          {statusOrder.map((status) => (
-            <div className="board-column" key={status}>
+          {statusOrder.map((status, index) => (
+            <div
+              className={`board-column ${status}`}
+              key={status}
+              style={{ "--column-index": index }}
+            >
               <div className="column-title">
-                <span>{statusLabels[status]}</span>
+                <span>
+                  <span
+                    className="column-dot"
+                    style={{ "--column-color": statusPalette[status] }}
+                  />
+                  {statusLabels[status]}
+                </span>
                 <small>{groupedIssues[status].length}</small>
               </div>
 
@@ -284,6 +320,9 @@ export default function App() {
                     onStatusChange={(nextStatus) => updateIssue(issue.id, { status: nextStatus })}
                   />
                 ))}
+                {groupedIssues[status].length === 0 && (
+                  <div className="empty-column">No issues in this status</div>
+                )}
               </div>
             </div>
           ))}
@@ -411,6 +450,28 @@ function LoginView({ onLogin }) {
           <DemoAccount role="Tester" email="tester@devtrack.local" password="tester123" />
         </div>
       </section>
+
+      <aside className="login-preview" aria-label="Board preview">
+        <div className="preview-head">
+          <span>Active sprint</span>
+          <strong>Release 1.0</strong>
+        </div>
+        <div className="preview-board">
+          <PreviewColumn label="To Do" count="3" tone="todo" />
+          <PreviewColumn label="In Progress" count="2" tone="progress" />
+          <PreviewColumn label="Testing" count="1" tone="testing" />
+        </div>
+        <div className="preview-card">
+          <span className="type-pill bug">
+            <Bug size={12} />
+            Bug
+          </span>
+          <strong>Fix dashboard counter refresh</strong>
+          <div className="preview-progress">
+            <span />
+          </div>
+        </div>
+      </aside>
     </main>
   );
 }
@@ -430,69 +491,183 @@ function Dashboard({ stats }) {
     stats.totals.totalIssues > 0
       ? Math.round((stats.totals.doneIssues / stats.totals.totalIssues) * 100)
       : 0;
+  const totalByStatus = Math.max(
+    1,
+    Object.values(stats.byStatus).reduce((sum, count) => sum + count, 0)
+  );
+  const totalByPriority = Math.max(
+    1,
+    Object.values(stats.byPriority).reduce((sum, count) => sum + count, 0)
+  );
 
   return (
-    <section className="dashboard-grid">
-      <StatCard icon={<ClipboardList size={18} />} label="Total Issues" value={stats.totals.totalIssues} />
-      <StatCard icon={<AlertCircle size={18} />} label="Open Issues" value={stats.totals.openIssues} />
-      <StatCard icon={<CheckCircle2 size={18} />} label="Done" value={`${completion}%`} />
-      <StatCard icon={<LayoutDashboard size={18} />} label="Projects" value={stats.totals.activeProjects} />
+    <section className="dashboard-area">
+      <div className="dashboard-grid">
+        <StatCard
+          icon={<ClipboardList size={18} />}
+          label="Total Issues"
+          value={stats.totals.totalIssues}
+          caption="Tracked items"
+          tone="neutral"
+          delay="0ms"
+        />
+        <StatCard
+          icon={<AlertCircle size={18} />}
+          label="Open Issues"
+          value={stats.totals.openIssues}
+          caption="Need attention"
+          tone="warning"
+          delay="55ms"
+        />
+        <StatCard
+          icon={<CheckCircle2 size={18} />}
+          label="Done"
+          value={`${completion}%`}
+          caption="Completion rate"
+          tone="success"
+          delay="110ms"
+        />
+        <StatCard
+          icon={<LayoutDashboard size={18} />}
+          label="Projects"
+          value={stats.totals.activeProjects}
+          caption="Active spaces"
+          tone="info"
+          delay="165ms"
+        />
+      </div>
+
+      <div className="insight-grid">
+        <article className="insight-card workflow-card">
+          <div className="insight-head">
+            <div>
+              <span>Workflow</span>
+              <strong>Status distribution</strong>
+            </div>
+            <small>{stats.totals.totalIssues} issues</small>
+          </div>
+          <div className="workflow-track" aria-label="Status distribution">
+            {statusOrder.map((status) => {
+              const count = stats.byStatus[status] || 0;
+              const width = Math.max(count === 0 ? 0 : 8, (count / totalByStatus) * 100);
+
+              return (
+                <span
+                  key={status}
+                  style={{
+                    "--segment-color": statusPalette[status],
+                    "--segment-width": `${width}%`
+                  }}
+                  title={`${statusLabels[status]}: ${count}`}
+                />
+              );
+            })}
+          </div>
+          <div className="status-legend">
+            {statusOrder.map((status) => (
+              <span key={status}>
+                <i style={{ "--legend-color": statusPalette[status] }} />
+                {statusLabels[status]}
+                <strong>{stats.byStatus[status] || 0}</strong>
+              </span>
+            ))}
+          </div>
+        </article>
+
+        <article className="insight-card priority-card">
+          <div className="insight-head">
+            <div>
+              <span>Priority</span>
+              <strong>Current risk level</strong>
+            </div>
+            <small>{stats.totals.openIssues} open</small>
+          </div>
+          {["high", "medium", "low"].map((priority) => {
+            const count = stats.byPriority[priority] || 0;
+            const width = Math.max(count === 0 ? 0 : 7, (count / totalByPriority) * 100);
+
+            return (
+              <div className="priority-row" key={priority}>
+                <span>{priorityLabels[priority]}</span>
+                <div className={`priority-meter ${priority}`}>
+                  <i style={{ "--meter-width": `${width}%` }} />
+                </div>
+                <strong>{count}</strong>
+              </div>
+            );
+          })}
+        </article>
+      </div>
     </section>
   );
 }
 
-function StatCard({ icon, label, value }) {
+function StatCard({ icon, label, value, caption, tone, delay }) {
   return (
-    <article className="stat-card">
+    <article className={`stat-card ${tone}`} style={{ "--card-delay": delay }}>
       <div className="stat-icon">{icon}</div>
       <div>
         <span>{label}</span>
         <strong>{value}</strong>
+        <small>{caption}</small>
       </div>
     </article>
   );
 }
 
-function FilterBar({ filters, setFilters, users }) {
+function FilterBar({ filters, setFilters, users, activeFilterCount, onReset }) {
   return (
-    <section className="filter-bar">
-      <div className="filter-title">
-        <Filter size={16} />
-        <span>Filters</span>
+    <section className="filter-card">
+      <div className="filter-header">
+        <div className="filter-title">
+          <Filter size={16} />
+          <div>
+            <span>Filters</span>
+            <small>{activeFilterCount > 0 ? `${activeFilterCount} active` : "All issues"}</small>
+          </div>
+        </div>
+        {activeFilterCount > 0 && (
+          <button className="subtle-button" onClick={onReset}>
+            Clear
+          </button>
+        )}
       </div>
-      <SelectFilter
-        label="Status"
-        value={filters.status}
-        onChange={(status) => setFilters((current) => ({ ...current, status }))}
-        options={[
-          ["all", "All"],
-          ...Object.entries(statusLabels)
-        ]}
-      />
-      <SelectFilter
-        label="Priority"
-        value={filters.priority}
-        onChange={(priority) => setFilters((current) => ({ ...current, priority }))}
-        options={[
-          ["all", "All"],
-          ...Object.entries(priorityLabels)
-        ]}
-      />
-      <SelectFilter
-        label="Type"
-        value={filters.type}
-        onChange={(type) => setFilters((current) => ({ ...current, type }))}
-        options={[
-          ["all", "All"],
-          ...Object.entries(typeLabels)
-        ]}
-      />
-      <SelectFilter
-        label="Assignee"
-        value={filters.assigneeId}
-        onChange={(assigneeId) => setFilters((current) => ({ ...current, assigneeId }))}
-        options={[["all", "All"], ...users.map((user) => [String(user.id), user.name])]}
-      />
+
+      <div className="filter-grid">
+        <SelectFilter
+          label="Status"
+          value={filters.status}
+          onChange={(status) => setFilters((current) => ({ ...current, status }))}
+          options={[
+            ["all", "All"],
+            ...Object.entries(statusLabels)
+          ]}
+        />
+        <SelectFilter
+          label="Priority"
+          value={filters.priority}
+          onChange={(priority) => setFilters((current) => ({ ...current, priority }))}
+          options={[
+            ["all", "All"],
+            ...Object.entries(priorityLabels)
+          ]}
+        />
+        <SelectFilter
+          label="Type"
+          value={filters.type}
+          onChange={(type) => setFilters((current) => ({ ...current, type }))}
+          options={[
+            ["all", "All"],
+            ...Object.entries(typeLabels)
+          ]}
+        />
+        <SelectFilter
+          label="Assignee"
+          value={filters.assigneeId}
+          onChange={(assigneeId) => setFilters((current) => ({ ...current, assigneeId }))}
+          options={[["all", "All"], ...users.map((user) => [String(user.id), user.name])]}
+        />
+      </div>
     </section>
   );
 }
@@ -523,9 +698,12 @@ function ProjectButton({ active, name, meta, onClick }) {
 
 function IssueCard({ issue, onClick, onStatusChange }) {
   return (
-    <article className="issue-card" onClick={onClick}>
+    <article className={`issue-card ${issue.type} priority-${issue.priority}`} onClick={onClick}>
       <div className="issue-card-head">
-        <span className={`type-pill ${issue.type}`}>{typeLabels[issue.type]}</span>
+        <span className={`type-pill ${issue.type}`}>
+          {issue.type === "bug" ? <Bug size={12} /> : <ClipboardList size={12} />}
+          {typeLabels[issue.type]}
+        </span>
         <span className={`priority-pill ${issue.priority}`}>{priorityLabels[issue.priority]}</span>
       </div>
 
@@ -533,7 +711,13 @@ function IssueCard({ issue, onClick, onStatusChange }) {
       <p>{issue.description}</p>
 
       <div className="issue-meta">
-        <span>{issue.projectKey}</span>
+        <span className="issue-reference">
+          {issue.projectKey}-{issue.id}
+        </span>
+        <span>
+          <CalendarDays size={14} />
+          {formatShortDate(issue.dueDate)}
+        </span>
         <span>
           <MessageSquare size={14} />
           {issue.commentCount}
@@ -550,6 +734,7 @@ function IssueCard({ issue, onClick, onStatusChange }) {
           onClick={(event) => event.stopPropagation()}
           onChange={(event) => onStatusChange(event.target.value)}
           aria-label="Change status"
+          className="status-select"
         >
           {Object.entries(statusLabels).map(([value, label]) => (
             <option key={value} value={value}>
@@ -579,6 +764,19 @@ function IssuePanel({ issue, users, projects, onClose, onUpdate, onComment }) {
             {issue.projectKey}-{issue.id}
           </span>
           <h2>{issue.title}</h2>
+          <div className="detail-badges">
+            <span className={`type-pill ${issue.type}`}>
+              {issue.type === "bug" ? <Bug size={12} /> : <ClipboardList size={12} />}
+              {typeLabels[issue.type]}
+            </span>
+            <span className={`priority-pill ${issue.priority}`}>
+              {priorityLabels[issue.priority]}
+            </span>
+            <span className="date-pill">
+              <CalendarDays size={12} />
+              {formatShortDate(issue.dueDate)}
+            </span>
+          </div>
         </div>
         <button className="icon-button" onClick={onClose} title="Close" aria-label="Close">
           <X size={18} />
@@ -793,6 +991,15 @@ function Modal({ title, children, onClose }) {
   );
 }
 
+function PreviewColumn({ label, count, tone }) {
+  return (
+    <div className={`preview-column ${tone}`}>
+      <span>{label}</span>
+      <strong>{count}</strong>
+    </div>
+  );
+}
+
 function Avatar({ user }) {
   const initials = user.name
     .split(" ")
@@ -810,4 +1017,15 @@ function Avatar({ user }) {
 
 function setFormField(setForm, field, value) {
   setForm((current) => ({ ...current, [field]: value }));
+}
+
+function formatShortDate(value) {
+  if (!value) {
+    return "No date";
+  }
+
+  return new Date(`${value}T00:00:00`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric"
+  });
 }
