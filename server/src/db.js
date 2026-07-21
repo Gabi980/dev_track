@@ -53,8 +53,32 @@ function createSchema(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      description TEXT NOT NULL DEFAULT '',
+      password_hash TEXT NOT NULL,
+      owner_id INTEGER NOT NULL,
+      invite_code TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (owner_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS workspace_members (
+      workspace_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'developer', 'tester')),
+      joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (workspace_id, user_id),
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS projects (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL DEFAULT 1,
       name TEXT NOT NULL,
       key TEXT NOT NULL UNIQUE,
       description TEXT NOT NULL,
@@ -62,6 +86,7 @@ function createSchema(db) {
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
       FOREIGN KEY (owner_id) REFERENCES users(id)
     );
 
@@ -103,12 +128,15 @@ function createSchema(db) {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
   `);
+
+  ensureColumn(db, "projects", "workspace_id", "INTEGER DEFAULT 1");
 }
 
 function seedDatabase(db) {
   const existingUsers = get(db, "SELECT COUNT(*) AS count FROM users");
 
   if (existingUsers.count > 0) {
+    ensureDefaultWorkspace(db);
     return;
   }
 
@@ -129,6 +157,27 @@ function seedDatabase(db) {
     `INSERT INTO users (name, email, role, password_hash, avatar_color)
      VALUES (?, ?, ?, ?, ?)`,
     ["Tina Tester", "tester@devtrack.local", "tester", hashPassword("tester123"), "#16a34a"]
+  );
+
+  run(
+    db,
+    `INSERT INTO workspaces (name, slug, description, password_hash, owner_id, invite_code)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      "DevTrack Demo Workspace",
+      "devtrack-demo",
+      "Default workspace for the Software Engineering demo.",
+      hashPassword("workspace123"),
+      1,
+      "DEVTRACK-DEMO"
+    ]
+  );
+
+  run(
+    db,
+    `INSERT INTO workspace_members (workspace_id, user_id, role)
+     VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)`,
+    [1, 1, "admin", 1, 2, "developer", 1, 3, "tester"]
   );
 
   run(
@@ -254,6 +303,63 @@ function seedDatabase(db) {
     "INSERT INTO activity (issue_id, user_id, action) VALUES (?, ?, ?)",
     [4, 2, "Marked issue as Done"]
   );
+
+  ensureDefaultWorkspace(db);
+}
+
+function ensureDefaultWorkspace(db) {
+  const existingUsers = all(
+    db,
+    "SELECT id, role FROM users ORDER BY id"
+  );
+
+  if (existingUsers.length === 0) {
+    return;
+  }
+
+  let workspace = get(db, "SELECT id FROM workspaces WHERE slug = ?", ["devtrack-demo"]);
+
+  if (!workspace) {
+    const owner = existingUsers[0];
+    run(
+      db,
+      `INSERT INTO workspaces (name, slug, description, password_hash, owner_id, invite_code)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        "DevTrack Demo Workspace",
+        "devtrack-demo",
+        "Default workspace for the Software Engineering demo.",
+        hashPassword("workspace123"),
+        owner.id,
+        "DEVTRACK-DEMO"
+      ]
+    );
+    workspace = { id: lastInsertId(db) };
+  }
+
+  for (const user of existingUsers) {
+    const role = ["admin", "developer", "tester"].includes(user.role) ? user.role : "developer";
+    run(
+      db,
+      `INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role)
+       VALUES (?, ?, ?)`,
+      [workspace.id, user.id, role]
+    );
+  }
+
+  run(
+    db,
+    "UPDATE projects SET workspace_id = ? WHERE workspace_id IS NULL OR workspace_id = 1",
+    [workspace.id]
+  );
+}
+
+function ensureColumn(db, table, column, definition) {
+  const columns = all(db, `PRAGMA table_info(${table})`).map((item) => item.name);
+
+  if (!columns.includes(column)) {
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 export function saveDatabase(db) {

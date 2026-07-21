@@ -37,17 +37,48 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ email, password })
     }),
+  register: (account) =>
+    request("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(account)
+    }),
   logout: () => request("/auth/logout", { method: "POST" }),
   me: () => request("/auth/me"),
-  users: () => request("/users"),
-  projects: () => request("/projects"),
+  workspaces: () => request("/workspaces"),
+  searchWorkspaces: (query) => request(`/workspaces/search${toQueryString({ q: query })}`),
+  createWorkspace: (workspace) =>
+    request("/workspaces", {
+      method: "POST",
+      body: JSON.stringify(workspace)
+    }),
+  joinWorkspace: (payload) =>
+    request("/workspaces/join", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateWorkspaceMemberRole: (workspaceId, userId, role) =>
+    request(`/workspaces/${workspaceId}/members/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role })
+    }),
+  leaveWorkspace: (workspaceId) =>
+    request(`/workspaces/${workspaceId}/members/me`, {
+      method: "DELETE"
+    }),
+  removeWorkspaceMember: (workspaceId, userId) =>
+    request(`/workspaces/${workspaceId}/members/${userId}`, {
+      method: "DELETE"
+    }),
+  users: (workspaceId) => request(`/users${toQueryString({ workspaceId })}`),
+  projects: (workspaceId) => request(`/projects${toQueryString({ workspaceId })}`),
   createProject: (project) =>
     request("/projects", {
       method: "POST",
       body: JSON.stringify(project)
     }),
+  deleteProject: (id) => request(`/projects/${id}`, { method: "DELETE" }),
   issues: (filters) => request(`/issues${toQueryString(filters)}`),
-  issue: (id) => request(`/issues/${id}`),
+  issue: (id, workspaceId) => request(`/issues/${id}${toQueryString({ workspaceId })}`),
   createIssue: (issue) =>
     request("/issues", {
       method: "POST",
@@ -58,12 +89,13 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch)
     }),
+  deleteIssue: (id) => request(`/issues/${id}`, { method: "DELETE" }),
   addComment: (id, body) =>
     request(`/issues/${id}/comments`, {
       method: "POST",
       body: JSON.stringify({ body })
     }),
-  stats: () => request("/dashboard/stats")
+  stats: (workspaceId) => request(`/dashboard/stats${toQueryString({ workspaceId })}`)
 };
 
 function toQueryString(filters = {}) {

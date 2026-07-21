@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { all, get, getDatabase, lastInsertId, run, saveDatabase } from "./db.js";
-import { createSessionToken, verifyPassword } from "./security.js";
+import { createSessionToken, hashPassword, verifyPassword } from "./security.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -11,6 +11,8 @@ const db = await getDatabase();
 const STATUSES = ["todo", "in_progress", "testing", "done"];
 const PRIORITIES = ["low", "medium", "high"];
 const TYPES = ["task", "bug"];
+const WORKSPACE_ROLES = ["admin", "developer", "tester"];
+const AVATAR_COLORS = ["#ef4444", "#2563eb", "#16a34a", "#d97706", "#7c3aed", "#0f766e"];
 
 app.use(
   cors({
@@ -51,6 +53,47 @@ app.post("/api/auth/login", (req, res) => {
   res.json({ token, user: publicUser });
 });
 
+app.post("/api/auth/register", (req, res) => {
+  const name = String(req.body.name || "").trim();
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+
+  if (name.length < 2 || !email.includes("@") || password.length < 6) {
+    return res.status(400).json({
+      message: "Name, a valid email, and a password of at least 6 characters are required."
+    });
+  }
+
+  try {
+    run(
+      db,
+      `INSERT INTO users (name, email, role, password_hash, avatar_color)
+       VALUES (?, ?, ?, ?, ?)`,
+      [name, email, "developer", hashPassword(password), pickAvatarColor(email)]
+    );
+
+    const user = get(
+      db,
+      `SELECT id, name, email, role, avatar_color AS avatarColor
+       FROM users
+       WHERE id = ?`,
+      [lastInsertId(db)]
+    );
+    const token = createSessionToken();
+    const publicUser = toPublicUser(user);
+    sessions.set(token, publicUser);
+    saveDatabase(db);
+
+    res.status(201).json({ token, user: publicUser });
+  } catch (error) {
+    if (String(error.message).includes("UNIQUE")) {
+      return res.status(409).json({ message: "An account with this email already exists." });
+    }
+
+    throw error;
+  }
+});
+
 app.use("/api", requireAuth);
 
 app.get("/api/auth/me", (req, res) => {
@@ -62,22 +105,258 @@ app.post("/api/auth/logout", (req, res) => {
   res.status(204).send();
 });
 
-app.get("/api/users", (_req, res) => {
+app.get("/api/workspaces", (req, res) => {
+  res.json({ workspaces: getUserWorkspaces(req.user.id) });
+});
+
+app.get("/api/workspaces/search", (req, res) => {
+  const query = String(req.query.q || "").trim().toLowerCase();
+
+  if (query.length < 2) {
+    return res.json({ workspaces: [] });
+  }
+
+  const workspaces = all(
+    db,
+    `SELECT
+       w.id,
+       w.name,
+       w.slug,
+       w.description,
+       COUNT(DISTINCT wm.user_id) AS memberCount,
+       COUNT(DISTINCT p.id) AS projectCount
+     FROM workspaces w
+     LEFT JOIN workspace_members wm ON wm.workspace_id = w.id
+     LEFT JOIN projects p ON p.workspace_id = w.id
+     WHERE lower(w.name) LIKE ? OR lower(w.slug) LIKE ?
+     GROUP BY w.id
+     ORDER BY w.name
+     LIMIT 8`,
+    [`%${query}%`, `%${query}%`]
+  ).map(toWorkspaceSearchResult);
+
+  res.json({ workspaces });
+});
+
+app.post("/api/workspaces", (req, res) => {
+  const name = String(req.body.name || "").trim();
+  const description = String(req.body.description || "").trim();
+  const password = String(req.body.password || "");
+
+  if (name.length < 3 || description.length < 8 || password.length < 6) {
+    return res.status(400).json({
+      message: "Workspace name, description, and a password of at least 6 characters are required."
+    });
+  }
+
+  const slug = makeUniqueWorkspaceSlug(name);
+  const inviteCode = makeInviteCode(slug);
+
+  run(
+    db,
+    `INSERT INTO workspaces (name, slug, description, password_hash, owner_id, invite_code)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [name, slug, description, hashPassword(password), req.user.id, inviteCode]
+  );
+
+  const workspaceId = lastInsertId(db);
+  run(
+    db,
+    `INSERT INTO workspace_members (workspace_id, user_id, role)
+     VALUES (?, ?, ?)`,
+    [workspaceId, req.user.id, "admin"]
+  );
+  saveDatabase(db);
+
+  res.status(201).json({
+    workspace: getUserWorkspaces(req.user.id).find((workspace) => workspace.id === workspaceId)
+  });
+});
+
+app.post("/api/workspaces/join", (req, res) => {
+  const password = String(req.body.password || "");
+  const inviteCode = String(req.body.inviteCode || "").trim().toUpperCase();
+  const workspaceId = Number(req.body.workspaceId);
+  let workspace;
+
+  if (inviteCode) {
+    workspace = get(db, "SELECT * FROM workspaces WHERE invite_code = ?", [inviteCode]);
+  } else if (workspaceId) {
+    workspace = get(db, "SELECT * FROM workspaces WHERE id = ?", [workspaceId]);
+
+    if (!workspace || !verifyPassword(password, workspace.password_hash)) {
+      return res.status(401).json({ message: "Workspace password is invalid." });
+    }
+  }
+
+  if (!workspace) {
+    return res.status(404).json({ message: "Workspace not found." });
+  }
+
+  run(
+    db,
+    `INSERT INTO workspace_members (workspace_id, user_id, role)
+     VALUES (?, ?, ?)
+     ON CONFLICT(workspace_id, user_id) DO NOTHING`,
+    [workspace.id, req.user.id, "developer"]
+  );
+  saveDatabase(db);
+
+  res.json({
+    workspace: getUserWorkspaces(req.user.id).find((item) => item.id === workspace.id)
+  });
+});
+
+app.patch("/api/workspaces/:workspaceId/members/:userId", (req, res) => {
+  const workspaceId = Number(req.params.workspaceId);
+  const userId = Number(req.params.userId);
+  const role = String(req.body.role || "");
+  const workspace = get(db, "SELECT id, owner_id AS ownerId FROM workspaces WHERE id = ?", [
+    workspaceId
+  ]);
+
+  if (!workspace) {
+    return res.status(404).json({ message: "Workspace not found." });
+  }
+
+  if (workspace.ownerId !== req.user.id) {
+    return res.status(403).json({
+      message: "Only the workspace creator can change member roles."
+    });
+  }
+
+  if (!WORKSPACE_ROLES.includes(role)) {
+    return res.status(400).json({ message: "Invalid workspace role." });
+  }
+
+  if (userId === workspace.ownerId && role !== "admin") {
+    return res.status(400).json({ message: "The workspace creator must remain an admin." });
+  }
+
+  const member = get(
+    db,
+    `SELECT user_id
+     FROM workspace_members
+     WHERE workspace_id = ? AND user_id = ?`,
+    [workspaceId, userId]
+  );
+
+  if (!member) {
+    return res.status(404).json({ message: "Workspace member not found." });
+  }
+
+  run(
+    db,
+    `UPDATE workspace_members
+     SET role = ?
+     WHERE workspace_id = ? AND user_id = ?`,
+    [role, workspaceId, userId]
+  );
+  saveDatabase(db);
+
+  res.json({ member: getWorkspaceMember(workspaceId, userId) });
+});
+
+app.delete("/api/workspaces/:workspaceId/members/me", (req, res) => {
+  const workspaceId = Number(req.params.workspaceId);
+  const workspace = get(db, "SELECT id, owner_id AS ownerId FROM workspaces WHERE id = ?", [
+    workspaceId
+  ]);
+
+  if (!workspace) {
+    return res.status(404).json({ message: "Workspace not found." });
+  }
+
+  const membership = getWorkspaceMembership(req.user.id, workspaceId);
+
+  if (!membership) {
+    return res.status(404).json({ message: "You are not a member of this workspace." });
+  }
+
+  leaveWorkspace(workspace, req.user.id);
+  saveDatabase(db);
+
+  res.status(204).send();
+});
+
+app.delete("/api/workspaces/:workspaceId/members/:userId", (req, res) => {
+  const workspaceId = Number(req.params.workspaceId);
+  const userId = Number(req.params.userId);
+  const workspace = get(db, "SELECT id, owner_id AS ownerId FROM workspaces WHERE id = ?", [
+    workspaceId
+  ]);
+
+  if (!workspace) {
+    return res.status(404).json({ message: "Workspace not found." });
+  }
+
+  if (workspace.ownerId !== req.user.id) {
+    return res.status(403).json({
+      message: "Only the workspace creator can remove members."
+    });
+  }
+
+  if (userId === workspace.ownerId) {
+    return res.status(400).json({ message: "Use Leave Workspace to leave your own workspace." });
+  }
+
+  const member = getWorkspaceMember(workspaceId, userId);
+
+  if (!member) {
+    return res.status(404).json({ message: "Workspace member not found." });
+  }
+
+  run(db, "UPDATE issues SET assignee_id = NULL WHERE assignee_id = ? AND project_id IN (SELECT id FROM projects WHERE workspace_id = ?)", [
+    userId,
+    workspaceId
+  ]);
+  run(db, "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?", [
+    workspaceId,
+    userId
+  ]);
+  saveDatabase(db);
+
+  res.status(204).send();
+});
+
+app.get("/api/users", (req, res) => {
+  const workspace = getActiveWorkspace(req, req.query.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "Select or join a workspace first." });
+  }
+
   res.json({
     users: all(
       db,
-      `SELECT id, name, email, role, avatar_color AS avatarColor
-       FROM users
-       ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'developer' THEN 2 ELSE 3 END, name`
+      `SELECT
+         u.id,
+         u.name,
+         u.email,
+         wm.role,
+         u.role AS accountRole,
+         u.avatar_color AS avatarColor
+       FROM workspace_members wm
+       JOIN users u ON u.id = wm.user_id
+       WHERE wm.workspace_id = ?
+       ORDER BY CASE wm.role WHEN 'admin' THEN 1 WHEN 'developer' THEN 2 ELSE 3 END, u.name`,
+      [workspace.id]
     )
   });
 });
 
-app.get("/api/projects", (_req, res) => {
+app.get("/api/projects", (req, res) => {
+  const workspace = getActiveWorkspace(req, req.query.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "Select or join a workspace first." });
+  }
+
   const projects = all(
     db,
     `SELECT
        p.id,
+       p.workspace_id AS workspaceId,
        p.name,
        p.key,
        p.description,
@@ -91,8 +370,10 @@ app.get("/api/projects", (_req, res) => {
      FROM projects p
      JOIN users u ON u.id = p.owner_id
      LEFT JOIN issues i ON i.project_id = p.id
+     WHERE p.workspace_id = ?
      GROUP BY p.id
-     ORDER BY p.created_at DESC`
+     ORDER BY p.created_at DESC`,
+    [workspace.id]
   ).map((project) => ({
     ...project,
     issueCount: Number(project.issueCount || 0),
@@ -102,7 +383,17 @@ app.get("/api/projects", (_req, res) => {
   res.json({ projects });
 });
 
-app.post("/api/projects", requireRole("admin"), (req, res) => {
+app.post("/api/projects", (req, res) => {
+  const workspace = getActiveWorkspace(req, req.body.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "Select or join a workspace first." });
+  }
+
+  if (workspace.role !== "admin") {
+    return res.status(403).json({ message: "Only workspace admins can create projects." });
+  }
+
   const name = String(req.body.name || "").trim();
   const description = String(req.body.description || "").trim();
   const key = String(req.body.key || "")
@@ -120,13 +411,13 @@ app.post("/api/projects", requireRole("admin"), (req, res) => {
   try {
     run(
       db,
-      `INSERT INTO projects (name, key, description, owner_id)
-       VALUES (?, ?, ?, ?)`,
-      [name, key, description, req.user.id]
+      `INSERT INTO projects (workspace_id, name, key, description, owner_id)
+       VALUES (?, ?, ?, ?, ?)`,
+      [workspace.id, name, key, description, req.user.id]
     );
     saveDatabase(db);
 
-    res.status(201).json({ project: getProject(lastInsertId(db)) });
+    res.status(201).json({ project: getProject(lastInsertId(db), workspace.id) });
   } catch (error) {
     if (String(error.message).includes("UNIQUE")) {
       return res.status(409).json({ message: "Project key already exists." });
@@ -136,8 +427,38 @@ app.post("/api/projects", requireRole("admin"), (req, res) => {
   }
 });
 
+app.delete("/api/projects/:id", (req, res) => {
+  const projectId = Number(req.params.id);
+  const project = getProject(projectId);
+
+  if (!project) {
+    return res.status(404).json({ message: "Project not found." });
+  }
+
+  const workspace = getWorkspaceMembership(req.user.id, project.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "You do not have access to this project." });
+  }
+
+  if (workspace.role !== "admin") {
+    return res.status(403).json({ message: "Only workspace admins can delete projects." });
+  }
+
+  deleteProjectData(projectId);
+  saveDatabase(db);
+
+  res.status(204).send();
+});
+
 app.get("/api/issues", (req, res) => {
-  res.json({ issues: getIssues(req.query) });
+  const workspace = getActiveWorkspace(req, req.query.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "Select or join a workspace first." });
+  }
+
+  res.json({ issues: getIssues(req.query, workspace.id) });
 });
 
 app.get("/api/issues/:id", (req, res) => {
@@ -147,11 +468,21 @@ app.get("/api/issues/:id", (req, res) => {
     return res.status(404).json({ message: "Issue not found." });
   }
 
+  if (!getWorkspaceMembership(req.user.id, issue.workspaceId)) {
+    return res.status(403).json({ message: "You do not have access to this issue." });
+  }
+
   res.json({ issue });
 });
 
 app.post("/api/issues", (req, res) => {
-  const payload = normalizeIssuePayload(req.body);
+  const workspace = getActiveWorkspace(req, req.body.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "Select or join a workspace first." });
+  }
+
+  const payload = normalizeIssuePayload(req.body, workspace.id);
 
   if (!payload.ok) {
     return res.status(400).json({ message: payload.message });
@@ -179,7 +510,7 @@ app.post("/api/issues", (req, res) => {
   addActivity(issueId, req.user.id, "Created issue");
   saveDatabase(db);
 
-  res.status(201).json({ issue: getIssue(issueId) });
+  res.status(201).json({ issue: getIssue(issueId, workspace.id) });
 });
 
 app.patch("/api/issues/:id", (req, res) => {
@@ -190,7 +521,13 @@ app.patch("/api/issues/:id", (req, res) => {
     return res.status(404).json({ message: "Issue not found." });
   }
 
-  const patch = normalizeIssuePatch(req.body);
+  const workspace = getWorkspaceMembership(req.user.id, existing.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "You do not have access to this issue." });
+  }
+
+  const patch = normalizeIssuePatch(req.body, existing.workspaceId);
 
   if (!patch.ok) {
     return res.status(400).json({ message: patch.message });
@@ -215,14 +552,43 @@ app.patch("/api/issues/:id", (req, res) => {
   addActivity(issueId, req.user.id, `Updated ${changedFields}`);
   saveDatabase(db);
 
-  res.json({ issue: getIssue(issueId) });
+  res.json({ issue: getIssue(issueId, existing.workspaceId) });
+});
+
+app.delete("/api/issues/:id", (req, res) => {
+  const issueId = Number(req.params.id);
+  const existing = getIssue(issueId);
+
+  if (!existing) {
+    return res.status(404).json({ message: "Issue not found." });
+  }
+
+  const workspace = getWorkspaceMembership(req.user.id, existing.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "You do not have access to this issue." });
+  }
+
+  if (workspace.role !== "admin") {
+    return res.status(403).json({ message: "Only workspace admins can delete bugs and tasks." });
+  }
+
+  deleteIssueData(issueId);
+  saveDatabase(db);
+
+  res.status(204).send();
 });
 
 app.post("/api/issues/:id/comments", (req, res) => {
   const issueId = Number(req.params.id);
+  const issue = getIssue(issueId);
 
-  if (!getIssue(issueId)) {
+  if (!issue) {
     return res.status(404).json({ message: "Issue not found." });
+  }
+
+  if (!getWorkspaceMembership(req.user.id, issue.workspaceId)) {
+    return res.status(403).json({ message: "You do not have access to this issue." });
   }
 
   const body = String(req.body.body || "").trim();
@@ -239,36 +605,54 @@ app.post("/api/issues/:id/comments", (req, res) => {
   addActivity(issueId, req.user.id, "Added comment");
   saveDatabase(db);
 
-  res.status(201).json({ issue: getIssue(issueId) });
+  res.status(201).json({ issue: getIssue(issueId, issue.workspaceId) });
 });
 
-app.get("/api/dashboard/stats", (_req, res) => {
+app.get("/api/dashboard/stats", (req, res) => {
+  const workspace = getActiveWorkspace(req, req.query.workspaceId);
+
+  if (!workspace) {
+    return res.status(403).json({ message: "Select or join a workspace first." });
+  }
+
   const statusCounts = all(
     db,
-    `SELECT status, COUNT(*) AS count
-     FROM issues
-     GROUP BY status`
+    `SELECT i.status AS status, COUNT(*) AS count
+     FROM issues i
+     JOIN projects p ON p.id = i.project_id
+     WHERE p.workspace_id = ?
+     GROUP BY i.status`,
+    [workspace.id]
   );
   const priorityCounts = all(
     db,
-    `SELECT priority, COUNT(*) AS count
-     FROM issues
-     GROUP BY priority`
+    `SELECT i.priority AS priority, COUNT(*) AS count
+     FROM issues i
+     JOIN projects p ON p.id = i.project_id
+     WHERE p.workspace_id = ?
+     GROUP BY i.priority`,
+    [workspace.id]
   );
   const typeCounts = all(
     db,
-    `SELECT type, COUNT(*) AS count
-     FROM issues
-     GROUP BY type`
+    `SELECT i.type AS type, COUNT(*) AS count
+     FROM issues i
+     JOIN projects p ON p.id = i.project_id
+     WHERE p.workspace_id = ?
+     GROUP BY i.type`,
+    [workspace.id]
   );
   const totals = get(
     db,
     `SELECT
        COUNT(*) AS totalIssues,
-       SUM(CASE WHEN status != 'done' THEN 1 ELSE 0 END) AS openIssues,
-       SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS doneIssues,
+       SUM(CASE WHEN i.status != 'done' THEN 1 ELSE 0 END) AS openIssues,
+       SUM(CASE WHEN i.status = 'done' THEN 1 ELSE 0 END) AS doneIssues,
        COUNT(DISTINCT project_id) AS activeProjects
-     FROM issues`
+     FROM issues i
+     JOIN projects p ON p.id = i.project_id
+     WHERE p.workspace_id = ?`,
+    [workspace.id]
   );
   const recentActivity = all(
     db,
@@ -284,8 +668,10 @@ app.get("/api/dashboard/stats", (_req, res) => {
      LEFT JOIN issues i ON i.id = a.issue_id
      LEFT JOIN projects p ON p.id = i.project_id
      JOIN users u ON u.id = a.user_id
+     WHERE p.workspace_id = ?
      ORDER BY a.created_at DESC, a.id DESC
-     LIMIT 8`
+     LIMIT 8`,
+    [workspace.id]
   );
 
   res.json({
@@ -327,21 +713,12 @@ function requireAuth(req, res, next) {
   next();
 }
 
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ message: "You do not have access to this action." });
-    }
-
-    next();
-  };
-}
-
-function getProject(id) {
+function getProject(id, workspaceId) {
   return get(
     db,
     `SELECT
        p.id,
+       p.workspace_id AS workspaceId,
        p.name,
        p.key,
        p.description,
@@ -356,15 +733,18 @@ function getProject(id) {
      JOIN users u ON u.id = p.owner_id
      LEFT JOIN issues i ON i.project_id = p.id
      WHERE p.id = ?
+       ${workspaceId ? "AND p.workspace_id = ?" : ""}
      GROUP BY p.id`,
-    [id]
+    workspaceId ? [id, workspaceId] : [id]
   );
 }
 
-function getIssues(query = {}) {
+function getIssues(query = {}, workspaceId) {
   const where = [];
   const params = [];
 
+  addFilter(where, params, "i.id", query.id);
+  addFilter(where, params, "p.workspace_id", workspaceId);
   addFilter(where, params, "i.project_id", query.projectId);
   addFilter(where, params, "i.status", query.status, STATUSES);
   addFilter(where, params, "i.priority", query.priority, PRIORITIES);
@@ -378,6 +758,7 @@ function getIssues(query = {}) {
     `SELECT
        i.id,
        i.project_id AS projectId,
+       p.workspace_id AS workspaceId,
        p.name AS projectName,
        p.key AS projectKey,
        i.title,
@@ -411,8 +792,8 @@ function getIssues(query = {}) {
   }));
 }
 
-function getIssue(id) {
-  const issue = getIssues({ id }).find((item) => item.id === id);
+function getIssue(id, workspaceId) {
+  const issue = getIssues({ id }, workspaceId).find((item) => item.id === id);
 
   if (!issue) {
     return null;
@@ -466,7 +847,7 @@ function addFilter(where, params, field, value, allowedValues) {
   params.push(Number.isNaN(Number(value)) || allowedValues ? value : Number(value));
 }
 
-function normalizeIssuePayload(body) {
+function normalizeIssuePayload(body, workspaceId) {
   const title = String(body.title || "").trim();
   const description = String(body.description || "").trim();
   const type = TYPES.includes(body.type) ? body.type : "task";
@@ -476,11 +857,21 @@ function normalizeIssuePayload(body) {
   const assigneeId = body.assigneeId ? Number(body.assigneeId) : null;
   const dueDate = body.dueDate ? String(body.dueDate) : null;
 
-  if (!projectId || !get(db, "SELECT id FROM projects WHERE id = ?", [projectId])) {
+  if (
+    !projectId ||
+    !get(db, "SELECT id FROM projects WHERE id = ? AND workspace_id = ?", [projectId, workspaceId])
+  ) {
     return { ok: false, message: "A valid project is required." };
   }
 
-  if (assigneeId && !get(db, "SELECT id FROM users WHERE id = ?", [assigneeId])) {
+  if (
+    assigneeId &&
+    !get(
+      db,
+      "SELECT user_id FROM workspace_members WHERE user_id = ? AND workspace_id = ?",
+      [assigneeId, workspaceId]
+    )
+  ) {
     return { ok: false, message: "A valid assignee is required." };
   }
 
@@ -497,7 +888,7 @@ function normalizeIssuePayload(body) {
   };
 }
 
-function normalizeIssuePatch(body) {
+function normalizeIssuePatch(body, workspaceId) {
   const assignments = [];
   const add = (field, value) => assignments.push([field, value]);
 
@@ -530,7 +921,7 @@ function normalizeIssuePatch(body) {
 
   if (body.projectId !== undefined) {
     const projectId = Number(body.projectId);
-    if (!get(db, "SELECT id FROM projects WHERE id = ?", [projectId])) {
+    if (!get(db, "SELECT id FROM projects WHERE id = ? AND workspace_id = ?", [projectId, workspaceId])) {
       return { ok: false, message: "Invalid project." };
     }
     add("project_id", projectId);
@@ -538,7 +929,14 @@ function normalizeIssuePatch(body) {
 
   if (body.assigneeId !== undefined) {
     const assigneeId = body.assigneeId ? Number(body.assigneeId) : null;
-    if (assigneeId && !get(db, "SELECT id FROM users WHERE id = ?", [assigneeId])) {
+    if (
+      assigneeId &&
+      !get(
+        db,
+        "SELECT user_id FROM workspace_members WHERE user_id = ? AND workspace_id = ?",
+        [assigneeId, workspaceId]
+      )
+    ) {
       return { ok: false, message: "Invalid assignee." };
     }
     add("assignee_id", assigneeId);
@@ -559,6 +957,228 @@ function addActivity(issueId, userId, action) {
   ]);
 }
 
+function deleteProjectData(projectId) {
+  run(
+    db,
+    `DELETE FROM activity
+     WHERE issue_id IN (SELECT id FROM issues WHERE project_id = ?)`,
+    [projectId]
+  );
+  run(
+    db,
+    `DELETE FROM comments
+     WHERE issue_id IN (SELECT id FROM issues WHERE project_id = ?)`,
+    [projectId]
+  );
+  run(db, "DELETE FROM issues WHERE project_id = ?", [projectId]);
+  run(db, "DELETE FROM projects WHERE id = ?", [projectId]);
+}
+
+function deleteIssueData(issueId) {
+  run(db, "DELETE FROM activity WHERE issue_id = ?", [issueId]);
+  run(db, "DELETE FROM comments WHERE issue_id = ?", [issueId]);
+  run(db, "DELETE FROM issues WHERE id = ?", [issueId]);
+}
+
+function leaveWorkspace(workspace, userId) {
+  const workspaceId = workspace.id;
+
+  run(
+    db,
+    `UPDATE issues
+     SET assignee_id = NULL
+     WHERE assignee_id = ?
+       AND project_id IN (SELECT id FROM projects WHERE workspace_id = ?)`,
+    [userId, workspaceId]
+  );
+
+  if (workspace.ownerId !== userId) {
+    run(db, "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?", [
+      workspaceId,
+      userId
+    ]);
+    return;
+  }
+
+  const nextOwner = get(
+    db,
+    `SELECT user_id AS userId
+     FROM workspace_members
+     WHERE workspace_id = ? AND user_id != ?
+     ORDER BY joined_at ASC
+     LIMIT 1`,
+    [workspaceId, userId]
+  );
+
+  if (!nextOwner) {
+    deleteWorkspaceData(workspaceId);
+    return;
+  }
+
+  run(db, "UPDATE workspaces SET owner_id = ?, updated_at = datetime('now') WHERE id = ?", [
+    nextOwner.userId,
+    workspaceId
+  ]);
+  run(db, "UPDATE workspace_members SET role = 'admin' WHERE workspace_id = ? AND user_id = ?", [
+    workspaceId,
+    nextOwner.userId
+  ]);
+  run(db, "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?", [
+    workspaceId,
+    userId
+  ]);
+}
+
+function deleteWorkspaceData(workspaceId) {
+  run(
+    db,
+    `DELETE FROM activity
+     WHERE issue_id IN (
+       SELECT i.id
+       FROM issues i
+       JOIN projects p ON p.id = i.project_id
+       WHERE p.workspace_id = ?
+     )`,
+    [workspaceId]
+  );
+  run(
+    db,
+    `DELETE FROM comments
+     WHERE issue_id IN (
+       SELECT i.id
+       FROM issues i
+       JOIN projects p ON p.id = i.project_id
+       WHERE p.workspace_id = ?
+     )`,
+    [workspaceId]
+  );
+  run(
+    db,
+    `DELETE FROM issues
+     WHERE project_id IN (SELECT id FROM projects WHERE workspace_id = ?)`,
+    [workspaceId]
+  );
+  run(db, "DELETE FROM projects WHERE workspace_id = ?", [workspaceId]);
+  run(db, "DELETE FROM workspace_members WHERE workspace_id = ?", [workspaceId]);
+  run(db, "DELETE FROM workspaces WHERE id = ?", [workspaceId]);
+}
+
+function getActiveWorkspace(req, requestedWorkspaceId) {
+  const workspaceId = Number(requestedWorkspaceId);
+  const params = [req.user.id];
+  const workspaceFilter = workspaceId ? "AND w.id = ?" : "";
+
+  if (workspaceId) {
+    params.push(workspaceId);
+  }
+
+  return toUserWorkspace(
+    get(
+      db,
+      `SELECT
+         w.id,
+         w.name,
+         w.slug,
+         w.description,
+         w.owner_id AS ownerId,
+         w.invite_code AS inviteCode,
+         wm.role
+       FROM workspace_members wm
+       JOIN workspaces w ON w.id = wm.workspace_id
+       WHERE wm.user_id = ?
+         ${workspaceFilter}
+       ORDER BY wm.joined_at ASC
+       LIMIT 1`,
+      params
+    ),
+    req.user.id
+  );
+}
+
+function getWorkspaceMembership(userId, workspaceId) {
+  return toUserWorkspace(
+    get(
+      db,
+      `SELECT
+         w.id,
+         w.name,
+         w.slug,
+         w.description,
+         w.owner_id AS ownerId,
+         w.invite_code AS inviteCode,
+         wm.role
+       FROM workspace_members wm
+       JOIN workspaces w ON w.id = wm.workspace_id
+       WHERE wm.user_id = ? AND wm.workspace_id = ?`,
+      [userId, workspaceId]
+    ),
+    userId
+  );
+}
+
+function getUserWorkspaces(userId) {
+  return all(
+    db,
+    `SELECT
+       w.id,
+       w.name,
+       w.slug,
+       w.description,
+       w.owner_id AS ownerId,
+       w.invite_code AS inviteCode,
+       wm.role,
+       wm.joined_at AS joinedAt,
+       COUNT(DISTINCT members.user_id) AS memberCount,
+       COUNT(DISTINCT p.id) AS projectCount
+     FROM workspace_members wm
+     JOIN workspaces w ON w.id = wm.workspace_id
+     LEFT JOIN workspace_members members ON members.workspace_id = w.id
+     LEFT JOIN projects p ON p.workspace_id = w.id
+     WHERE wm.user_id = ?
+     GROUP BY w.id, wm.role, wm.joined_at
+     ORDER BY wm.joined_at ASC`,
+    [userId]
+  ).map((workspace) => toUserWorkspace(workspace, userId));
+}
+
+function toUserWorkspace(workspace, userId) {
+  if (!workspace) {
+    return null;
+  }
+
+  return {
+    ...workspace,
+    inviteCode: workspace.ownerId === userId ? workspace.inviteCode : null,
+    memberCount: Number(workspace.memberCount || 0),
+    projectCount: Number(workspace.projectCount || 0)
+  };
+}
+
+function getWorkspaceMember(workspaceId, userId) {
+  return get(
+    db,
+    `SELECT
+       u.id,
+       u.name,
+       u.email,
+       wm.role,
+       u.role AS accountRole,
+       u.avatar_color AS avatarColor
+     FROM workspace_members wm
+     JOIN users u ON u.id = wm.user_id
+     WHERE wm.workspace_id = ? AND wm.user_id = ?`,
+    [workspaceId, userId]
+  );
+}
+
+function toWorkspaceSearchResult(workspace) {
+  return {
+    ...workspace,
+    memberCount: Number(workspace.memberCount || 0),
+    projectCount: Number(workspace.projectCount || 0)
+  };
+}
+
 function countMap(rows, field, keys) {
   const result = Object.fromEntries(keys.map((key) => [key, 0]));
 
@@ -577,6 +1197,49 @@ function toPublicUser(user) {
     role: user.role,
     avatarColor: user.avatarColor
   };
+}
+
+function makeUniqueWorkspaceSlug(name) {
+  const base = makeSlug(name);
+  let slug = base;
+  let index = 2;
+
+  while (get(db, "SELECT id FROM workspaces WHERE slug = ?", [slug])) {
+    slug = `${base}-${index}`;
+    index += 1;
+  }
+
+  return slug;
+}
+
+function makeSlug(value) {
+  return (
+    String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 36) || "workspace"
+  );
+}
+
+function makeInviteCode(slug) {
+  const prefix = slug.replace(/[^a-z0-9]/g, "").toUpperCase().slice(0, 8) || "DEVTRACK";
+  let inviteCode;
+
+  do {
+    inviteCode = `${prefix}-${createSessionToken().slice(0, 6).toUpperCase()}`;
+  } while (get(db, "SELECT id FROM workspaces WHERE invite_code = ?", [inviteCode]));
+
+  return inviteCode;
+}
+
+function pickAvatarColor(seed) {
+  const total = String(seed || "")
+    .split("")
+    .reduce((sum, char) => sum + char.charCodeAt(0), 0);
+
+  return AVATAR_COLORS[total % AVATAR_COLORS.length];
 }
 
 function humanFieldName(field) {
